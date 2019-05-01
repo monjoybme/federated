@@ -137,26 +137,7 @@ def _create_lambda_to_identity(parameter_name, parameter_type):
   return computation_building_blocks.Lambda(ref.name, ref.type_signature, ref)
 
 
-def _create_dummy_block(comp):
-  r"""Creates a dummy block.
-
-                Block
-               /     \
-  local=Data(x)       Comp
-
-  Args:
-    comp: A `computation_building_blocks.ComputationBuildingBlock`.
-
-  Returns:
-    A dummy `computation_building_blocks.Block`.
-  """
-  py_typecheck.check_type(comp,
-                          computation_building_blocks.ComputationBuildingBlock)
-  data = computation_building_blocks.Data('x', tf.int32)
-  return computation_building_blocks.Block([('local', data)], comp)
-
-
-def _create_lambda_to_dummy_intrinsic(uri='dummy', type_spec=tf.int32):
+def _create_lambda_to_dummy_intrinsic(uri='dummy', parameter_type=tf.int32):
   r"""Creates a lambda to call a dummy intrinsic.
 
   Lambda(x)
@@ -167,17 +148,15 @@ def _create_lambda_to_dummy_intrinsic(uri='dummy', type_spec=tf.int32):
 
   Args:
     uri: The URI of the intrinsic.
-    type_spec: The type of the parameter.
+    parameter_type: The type of the parameter.
 
   Returns:
     A `computation_building_blocks.Lambda`.
   """
-  py_typecheck.check_type(type_spec, tf.dtypes.DType)
-  intrinsic_type = computation_types.FunctionType(type_spec, type_spec)
-  intrinsic = computation_building_blocks.Intrinsic(uri, intrinsic_type)
-  ref = computation_building_blocks.Reference('x', type_spec)
-  call = computation_building_blocks.Call(intrinsic, ref)
-  return computation_building_blocks.Lambda(ref.name, ref.type_signature, call)
+  py_typecheck.check_type(parameter_type, tf.dtypes.DType)
+  call = _create_dummy_called_intrinsic(
+      uri=uri, parameter_name='x', parameter_type=parameter_type)
+  return computation_building_blocks.Lambda('x', parameter_type, call)
 
 
 def _create_lambda_to_dummy_cast(parameter_type, result_type):
@@ -198,6 +177,13 @@ def _create_lambda_to_dummy_cast(parameter_type, result_type):
   py_typecheck.check_type(result_type, tf.dtypes.DType)
   arg = computation_building_blocks.Data('y', result_type)
   return computation_building_blocks.Lambda('x', parameter_type, arg)
+
+
+def _create_dummy_block(comp, variable_name='v', variable_type=tf.int32):
+  py_typecheck.check_type(comp,
+                          computation_building_blocks.ComputationBuildingBlock)
+  data = computation_building_blocks.Data('x', variable_type)
+  return computation_building_blocks.Block([(variable_name, data)], comp)
 
 
 def _create_dummy_called_federated_aggregate():
@@ -246,12 +232,14 @@ def _create_dummy_called_sequence_map(parameter_name='x',
   return computation_constructing_utils.create_sequence_map(fn, arg)
 
 
-def _create_dummy_called_intrinsic(uri='dummy', type_spec=tf.int32):
-  py_typecheck.check_type(type_spec, tf.dtypes.DType)
-  intrinsic_type = computation_types.FunctionType(type_spec, type_spec)
+def _create_dummy_called_intrinsic(uri='dummy',
+                                   parameter_name='x',
+                                   parameter_type=tf.int32):
+  intrinsic_type = computation_types.FunctionType(parameter_type,
+                                                  parameter_type)
   intrinsic = computation_building_blocks.Intrinsic(uri, intrinsic_type)
-  arg = computation_building_blocks.Data('x', type_spec)
-  return computation_building_blocks.Call(intrinsic, arg)
+  ref = computation_building_blocks.Reference(parameter_name, parameter_type)
+  return computation_building_blocks.Call(intrinsic, ref)
 
 
 def _create_block_wrapping_data(type_signature):
@@ -390,14 +378,14 @@ class ReplaceIntrinsicWithCallableTest(absltest.TestCase):
     transformed_comp, modified = transformations.replace_intrinsic_with_callable(
         comp, uri, body, context_stack_impl.context_stack)
 
-    self.assertEqual(comp.tff_repr, '(let local=x in (x -> dummy(x)))')
+    self.assertEqual(comp.tff_repr, '(let v=x in (x -> dummy(x)))')
     self.assertEqual(transformed_comp.tff_repr,
-                     '(let local=x in (x -> (dummy_arg -> dummy_arg)(x)))')
+                     '(let v=x in (x -> (dummy_arg -> dummy_arg)(x)))')
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertTrue(modified)
 
   def test_replaces_chained_intrinsics(self):
-    fn = _create_lambda_to_dummy_intrinsic(type_spec=tf.int32)
+    fn = _create_lambda_to_dummy_intrinsic(parameter_type=tf.int32)
     arg = computation_building_blocks.Data('x', tf.int32)
     call = _create_chained_calls([fn, fn], arg)
     comp = call
@@ -459,9 +447,8 @@ class ReplaceCalledLambdaWithBlockTest(absltest.TestCase):
     transformed_comp, modified = transformations.replace_called_lambda_with_block(
         comp)
 
-    self.assertEqual(comp.tff_repr, '(let local=x in (x -> x)(y))')
-    self.assertEqual(transformed_comp.tff_repr,
-                     '(let local=x in (let x=y in x))')
+    self.assertEqual(comp.tff_repr, '(let v=x in (x -> x)(y))')
+    self.assertEqual(transformed_comp.tff_repr, '(let v=x in (let x=y in x))')
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertTrue(modified)
 
@@ -502,7 +489,7 @@ class ReplaceCalledLambdaWithBlockTest(absltest.TestCase):
         comp)
 
     self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
-    self.assertEqual(transformed_comp.tff_repr, '(let local=x in (x -> x))(y)')
+    self.assertEqual(transformed_comp.tff_repr, '(let v=x in (x -> x))(y)')
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertFalse(modified)
 
@@ -562,9 +549,8 @@ class RemoveMappedOrAppliedIdentityTest(parameterized.TestCase):
     transformed_comp, modified = transformations.remove_mapped_or_applied_identity(
         comp)
 
-    self.assertEqual(comp.tff_repr,
-                     '(let local=x in federated_map(<(x -> x),y>))')
-    self.assertEqual(transformed_comp.tff_repr, '(let local=x in y)')
+    self.assertEqual(comp.tff_repr, '(let v=x in federated_map(<(x -> x),y>))')
+    self.assertEqual(transformed_comp.tff_repr, '(let v=x in y)')
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertTrue(modified)
 
@@ -730,11 +716,10 @@ class ReplaceChainedFederatedMapsWithFederatedMapTest(absltest.TestCase):
 
     self.assertEqual(
         comp.tff_repr,
-        '(let local=x in federated_map(<(x -> x),federated_map(<(x -> x),y>)>))'
-    )
+        '(let v=x in federated_map(<(x -> x),federated_map(<(x -> x),y>)>))')
     self.assertEqual(
         transformed_comp.tff_repr,
-        '(let local=x in federated_map(<(let fn=<(x -> x),(x -> x)> in (arg -> fn[1](fn[0](arg)))),y>))'
+        '(let v=x in federated_map(<(let fn=<(x -> x),(x -> x)> in (arg -> fn[1](fn[0](arg)))),y>))'
     )
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertTrue(modified)
@@ -800,8 +785,7 @@ class ReplaceChainedFederatedMapsWithFederatedMapTest(absltest.TestCase):
     self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
     self.assertEqual(
         transformed_comp.tff_repr,
-        'federated_map(<(x -> x),(let local=x in federated_map(<(x -> x),y>))>)'
-    )
+        'federated_map(<(x -> x),(let v=x in federated_map(<(x -> x),y>))>)')
     self.assertEqual(transformed_comp.type_signature, comp.type_signature)
     self.assertFalse(modified)
 
@@ -1085,13 +1069,13 @@ class MergeTupleIntrinsicsTest(absltest.TestCase):
 
     self.assertEqual(
         comp.tff_repr,
-        '(let local=x in <federated_map(<(x -> x),y>),federated_map(<(x -> x),y>)>)'
+        '(let v=x in <federated_map(<(x -> x),y>),federated_map(<(x -> x),y>)>)'
     )
     # pyformat: disable
     # pylint: disable=bad-continuation
     self.assertEqual(
         transformed_comp.tff_repr,
-        '(let local=x in (let value=federated_map(<'
+        '(let v=x in (let value=federated_map(<'
             '(let fn=<(x -> x),(x -> x)> in (arg -> <fn[0](arg[0]),fn[1](arg[1])>)),'
             'federated_map(<'
               '(x -> <x[0],x[1]>),federated_map(<'
@@ -1362,6 +1346,708 @@ class ReplaceSelectionFromTupleWithTupleElementTest(absltest.TestCase):
     self.assertTrue(y_transformed)
     self.assertEqual(collapsed_selection_x.proto, x_data.proto)
     self.assertEqual(collapsed_selection_y.proto, y_data.proto)
+
+
+class ExtractIntrinsicsTest(absltest.TestCase):
+
+  def test_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      transformations.extract_intrinsics(None, intrinsic_defs.FEDERATED_MAP.uri)
+
+  def test_extracts_from_block_result_intrinsic(self):
+    data = computation_building_blocks.Data('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    block = computation_building_blocks.Block((('a', data),), intrinsic)
+    comp = block
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let a=y in dummy(x))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=y,_variable1=dummy(x) in _variable1)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_result_block_one_var_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    data = computation_building_blocks.Data('y', tf.int32)
+    block_2 = computation_building_blocks.Block((('b', data),), block_1)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let b=y in (let a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr, '(let b=y,a=dummy(x) in a)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_result_block_multiple_vars_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    data = computation_building_blocks.Data('y', tf.int32)
+    block_2 = computation_building_blocks.Block((('a', data),), block_1)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(let a=y in (let a=dummy(x),a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=y,a=dummy(x),a=dummy(x) in a)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_one_var_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block(((ref_1.name, intrinsic),),
+                                                ref_1)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block(((ref_2.name, block_1),), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let b=(let a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr, '(let a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_multiple_vars_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block((
+        (ref_1.name, intrinsic),
+        (ref_1.name, intrinsic),
+    ), ref_1)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block(((ref_2.name, block_1),), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(let b=(let a=dummy(x),a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x),a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_one_var_bound_by_lambda(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block(((ref_1.name, intrinsic),),
+                                                ref_1)
+    data = computation_building_blocks.Data('y', tf.int32)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block((
+        ('x', data),
+        (ref_2.name, block_1),
+    ), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let x=y,b=(let a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr, '(let x=y,a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_multiple_vars_bound_by_lambda(
+      self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block((
+        (ref_1.name, intrinsic),
+        (ref_1.name, intrinsic),
+    ), ref_1)
+    data = computation_building_blocks.Data('y', tf.int32)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block((
+        ('x', data),
+        (ref_2.name, block_1),
+    ), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(let x=y,b=(let a=dummy(x),a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let x=y,a=dummy(x),a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_one_var_bound_by_block(self):
+    data = computation_building_blocks.Data('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block((
+        ('x', data),
+        (ref_1.name, intrinsic),
+    ), ref_1)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block((
+        ('a', data),
+        (ref_2.name, block_1),
+    ), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(let a=y,b=(let x=y,a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=y,x=y,a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_block_variables_block_multiple_vars_bound_by_block(
+      self):
+    data = computation_building_blocks.Data('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block_1 = computation_building_blocks.Block((
+        ('x', data),
+        (ref_1.name, intrinsic),
+        (ref_1.name, intrinsic),
+    ), ref_1)
+    ref_2 = computation_building_blocks.Reference('b', tf.int32)
+    block_2 = computation_building_blocks.Block((
+        ('a', data),
+        (ref_2.name, block_1),
+    ), ref_2)
+    comp = block_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(let a=y,b=(let x=y,a=dummy(x),a=dummy(x) in a) in b)')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=y,x=y,a=dummy(x),a=dummy(x),b=a in b)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_call_intrinsic(self):
+    fn = _create_lambda_to_identity('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    call = computation_building_blocks.Call(fn, intrinsic)
+    comp = call
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> y)(dummy(x))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=dummy(x) in (y -> y)(_variable1))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_call_block_one_var(self):
+    fn = _create_lambda_to_identity('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    call = computation_building_blocks.Call(fn, block)
+    comp = call
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> y)((let a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x) in (y -> y)(a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_call_block_multiple_vars(self):
+    fn = _create_lambda_to_identity('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    call = computation_building_blocks.Call(fn, block)
+    comp = call
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(y -> y)((let a=dummy(x),a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x),a=dummy(x) in (y -> y)(a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_intrinsic_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    fn = computation_building_blocks.Lambda('y', tf.int32, intrinsic)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> dummy(x))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=dummy(x) in (y -> _variable1))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_intrinsic_bound_by_lambda(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    fn = computation_building_blocks.Lambda('x', tf.int32, intrinsic)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(x -> dummy(x))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(x -> (let _variable1=dummy(x) in _variable1))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_one_var_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    fn = computation_building_blocks.Lambda('y', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> (let a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr, '(let a=dummy(x) in (y -> a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_multiple_vars_unbound(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    fn = computation_building_blocks.Lambda('y', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> (let a=dummy(x),a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x),a=dummy(x) in (y -> a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_first_var_unbound(self):
+    intrinsic_1 = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a',
+                                                  intrinsic_1.type_signature)
+    intrinsic_2 = _create_dummy_called_intrinsic(parameter_name='y')
+    ref_2 = computation_building_blocks.Reference('b',
+                                                  intrinsic_2.type_signature)
+    block = computation_building_blocks.Block((
+        (ref_1.name, intrinsic_1),
+        (ref_2.name, intrinsic_2),
+    ), ref_2)
+    fn = computation_building_blocks.Lambda('y', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> (let a=dummy(x),b=dummy(y) in b))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x) in (y -> (let b=dummy(y) in b)))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_last_var_unbound(self):
+    intrinsic_1 = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_1 = computation_building_blocks.Reference('a',
+                                                  intrinsic_1.type_signature)
+    intrinsic_2 = _create_dummy_called_intrinsic(parameter_name='y')
+    ref_2 = computation_building_blocks.Reference('b',
+                                                  intrinsic_2.type_signature)
+    block = computation_building_blocks.Block((
+        (ref_1.name, intrinsic_1),
+        (ref_2.name, intrinsic_2),
+    ), ref_2)
+    fn = computation_building_blocks.Lambda('x', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(x -> (let a=dummy(x),b=dummy(y) in b))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let b=dummy(y) in (x -> (let a=dummy(x) in b)))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_one_var_bound_by_block(self):
+    data = computation_building_blocks.Data('z', tf.int32)
+    ref_1 = computation_building_blocks.Reference('x', data.type_signature)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_2 = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref_1.name, data),
+        (ref_2.name, intrinsic),
+    ), ref_2)
+    fn = computation_building_blocks.Lambda('y', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> (let x=z,a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let x=z,a=dummy(x) in (y -> a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_lambda_block_multiple_vars_bound_by_block(self):
+    data = computation_building_blocks.Data('z', tf.int32)
+    ref_1 = computation_building_blocks.Reference('x', data.type_signature)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref_2 = computation_building_blocks.Reference('b', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref_1.name, data),
+        (ref_2.name, intrinsic),
+        (ref_2.name, intrinsic),
+    ), ref_2)
+    fn = computation_building_blocks.Lambda('y', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(y -> (let x=z,b=dummy(x),b=dummy(x) in b))')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let x=z,b=dummy(x),b=dummy(x) in (y -> b))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_selection_intrinsic(self):
+    parameter_type = computation_types.NamedTupleType((tf.int32, tf.int32))
+    intrinsic = _create_dummy_called_intrinsic(
+        parameter_name='x', parameter_type=parameter_type)
+    sel = computation_building_blocks.Selection(intrinsic, index=0)
+    comp = sel
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, 'dummy(x)[0]')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=dummy(x) in _variable1[0])')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_selection_named_intrinsic(self):
+    parameter_type = computation_types.NamedTupleType((
+        ('a', tf.int32),
+        ('b', tf.int32),
+    ))
+    intrinsic = _create_dummy_called_intrinsic(
+        parameter_name='x', parameter_type=parameter_type)
+    sel = computation_building_blocks.Selection(intrinsic, index=0)
+    comp = sel
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, 'dummy(x)[0]')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=dummy(x) in _variable1[0])')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_selection_block_one_var(self):
+    parameter_type = computation_types.NamedTupleType((tf.int32, tf.int32))
+    intrinsic = _create_dummy_called_intrinsic(
+        parameter_name='x', parameter_type=parameter_type)
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    sel = computation_building_blocks.Selection(block, index=0)
+    comp = sel
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let a=dummy(x) in a)[0]')
+    self.assertEqual(transformed_comp.tff_repr, '(let a=dummy(x) in a[0])')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_selection_block_multiple_vars(self):
+    parameter_type = computation_types.NamedTupleType((tf.int32, tf.int32))
+    intrinsic = _create_dummy_called_intrinsic(
+        parameter_name='x', parameter_type=parameter_type)
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    sel = computation_building_blocks.Selection(block, index=0)
+    comp = sel
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(let a=dummy(x),a=dummy(x) in a)[0]')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let a=dummy(x),a=dummy(x) in a[0])')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_one_intrinsic(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    tup = computation_building_blocks.Tuple((intrinsic,))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '<dummy(x)>')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=dummy(x) in <_variable1>)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_multiple_intrinsics(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    tup = computation_building_blocks.Tuple((intrinsic, intrinsic))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '<dummy(x),dummy(x)>')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable1=dummy(x),_variable2=dummy(x) in <_variable1,_variable2>)'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_named_intrinsics(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    tup = computation_building_blocks.Tuple((
+        ('a', intrinsic),
+        ('b', intrinsic),
+    ))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '<a=dummy(x),b=dummy(x)>')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable1=dummy(x),_variable2=dummy(x) in <a=_variable1,b=_variable2>)'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_one_block_one_var(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    tup = computation_building_blocks.Tuple((block,))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '<(let a=dummy(x) in a)>')
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(let _variable1=(let a=dummy(x) in a) in <_variable1>)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_one_block_multiple_vars(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    tup = computation_building_blocks.Tuple((block,))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '<(let a=dummy(x),a=dummy(x) in a)>')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable1=(let a=dummy(x),a=dummy(x) in a) in <_variable1>)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_multiple_blocks_one_var(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    tup = computation_building_blocks.Tuple((block, block))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '<(let a=dummy(x) in a),(let a=dummy(x) in a)>')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable1=(let a=dummy(x) in a),_variable2=(let a=dummy(x) in a) in <_variable1,_variable2>)'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_from_tuple_multiple_blocks_multiple_vars(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        (ref.name, intrinsic),
+    ), ref)
+    tup = computation_building_blocks.Tuple((block, block))
+    comp = tup
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(
+        comp.tff_repr,
+        '<(let a=dummy(x),a=dummy(x) in a),(let a=dummy(x),a=dummy(x) in a)>')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable1=(let a=dummy(x),a=dummy(x) in a),_variable2=(let a=dummy(x),a=dummy(x) in a) in <_variable1,_variable2>)'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_one_intrinsic(self):
+    fn_1 = _create_lambda_to_identity('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    tup = computation_building_blocks.Tuple((intrinsic,))
+    sel = computation_building_blocks.Selection(tup, index=0)
+    data = computation_building_blocks.Data('z', tf.int32)
+    block = computation_building_blocks.Block((('a', data),), sel)
+    call_1 = computation_building_blocks.Call(fn_1, block)
+    call_2 = computation_building_blocks.Call(fn_1, call_1)
+    fn_2 = computation_building_blocks.Lambda('w', tf.int32, call_2)
+    comp = fn_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr,
+                     '(w -> (y -> y)((y -> y)((let a=z in <dummy(x)>[0]))))')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let a=z,_variable1=dummy(x) in (w -> (y -> y)((y -> y)(<_variable1>[0]))))'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_multiple_intrinsics(self):
+    fn_1 = _create_lambda_to_identity('y', tf.int32)
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    tup = computation_building_blocks.Tuple((intrinsic, intrinsic))
+    sel = computation_building_blocks.Selection(tup, index=0)
+    data = computation_building_blocks.Data('z', tf.int32)
+    block = computation_building_blocks.Block((
+        ('a', data),
+        ('b', intrinsic),
+    ), sel)
+    call_1 = computation_building_blocks.Call(fn_1, block)
+    call_2 = computation_building_blocks.Call(fn_1, call_1)
+    fn_2 = computation_building_blocks.Lambda('w', tf.int32, call_2)
+    comp = fn_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(
+        comp.tff_repr,
+        '(w -> (y -> y)((y -> y)((let a=z,b=dummy(x) in <dummy(x),dummy(x)>[0]))))'
+    )
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let a=z,b=dummy(x),_variable1=dummy(x),_variable2=dummy(x) in (w -> (y -> y)((y -> y)(<_variable1,_variable2>[0]))))'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_extracts_multiple_intrinsics_dependent_bindings(self):
+    intrinsic_1 = _create_dummy_called_intrinsic(parameter_name='x')
+    fn_1 = computation_building_blocks.Lambda('x', tf.int32, intrinsic_1)
+    data = computation_building_blocks.Data('z', tf.int32)
+    call_1 = computation_building_blocks.Call(fn_1, data)
+    intrinsic_type = computation_types.FunctionType(tf.int32, tf.int32)
+    intrinsic = computation_building_blocks.Intrinsic('dummy', intrinsic_type)
+    call_2 = computation_building_blocks.Call(intrinsic, call_1)
+    fn_2 = computation_building_blocks.Lambda('y', tf.int32, call_2)
+    comp = fn_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(comp.tff_repr, '(y -> dummy((x -> dummy(x))(z)))')
+    self.assertEqual(
+        transformed_comp.tff_repr,
+        '(let _variable2=dummy((x -> (let _variable1=dummy(x) in _variable1))(z)) in (y -> _variable2))'
+    )
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertTrue(modified)
+
+  def test_does_not_extract_from_block_variables_intrinsic(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    comp = block
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
+    self.assertEqual(transformed_comp.tff_repr, '(let a=dummy(x) in a)')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertFalse(modified)
+
+  def test_does_not_extract_from_lambda_block_one_var_bound_by_lambda(self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block(((ref.name, intrinsic),), ref)
+    fn = computation_building_blocks.Lambda('x', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
+    self.assertEqual(transformed_comp.tff_repr, '(x -> (let a=dummy(x) in a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertFalse(modified)
+
+  def test_does_not_extract_from_lambda_block_multiple_vars_bound_by_lambda(
+      self):
+    intrinsic = _create_dummy_called_intrinsic(parameter_name='x')
+    ref = computation_building_blocks.Reference('a', intrinsic.type_signature)
+    block = computation_building_blocks.Block((
+        (ref.name, intrinsic),
+        ('b', intrinsic),
+    ), ref)
+    fn = computation_building_blocks.Lambda('x', tf.int32, block)
+    comp = fn
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
+    self.assertEqual(transformed_comp.tff_repr,
+                     '(x -> (let a=dummy(x),b=dummy(x) in a))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertFalse(modified)
+
+  def test_does_not_extract_called_lambda(self):
+    fn_1 = _create_lambda_to_identity('x', tf.int32)
+    arg = computation_building_blocks.Data('z', tf.int32)
+    call = computation_building_blocks.Call(fn_1, arg)
+    fn_2 = computation_building_blocks.Lambda('y', tf.int32, call)
+    comp = fn_2
+
+    transformed_comp, modified = transformations.extract_intrinsics(comp)
+
+    self.assertEqual(transformed_comp.tff_repr, comp.tff_repr)
+    self.assertEqual(transformed_comp.tff_repr, '(y -> (x -> x)(z))')
+    self.assertEqual(transformed_comp.type_signature, comp.type_signature)
+    self.assertFalse(modified)
 
 
 class UniquifyReferencesTest(absltest.TestCase):

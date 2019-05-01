@@ -130,9 +130,9 @@ def replace_called_lambda_with_block(comp):
 
   with the following computation containing a block:
 
-            Block
-           /     \
-  x=Comp(y)       Comp(z)
+             Block
+            /     \
+  [x=Comp(y)]       Comp(z)
 
   let x=y in z
 
@@ -191,7 +191,7 @@ def remove_mapped_or_applied_identity(comp):
   y
 
   Args:
-    comp: The computation building block in which to perform the replacements.
+    comp: The computation building block in which to perform the removals.
 
   Returns:
     A new computation with the transformation applied or the original `comp`.
@@ -280,7 +280,7 @@ def replace_chained_federated_maps_with_federated_map(comp):
                           computation_building_blocks.ComputationBuildingBlock)
 
   def _should_transform(comp):
-    """Returns `True` if `comp` is a chained federated map computation."""
+    """Returns `True` if `comp` is a chained federated map."""
     uri = intrinsic_defs.FEDERATED_MAP.uri
     if _is_called_intrinsic(comp, uri):
       outer_arg = comp.argument[1]
@@ -311,7 +311,7 @@ def replace_chained_federated_maps_with_federated_map(comp):
       (let fn=<y, x> in (arg -> fn[1](fn[0](arg)))
 
       Args:
-        comps: a Python list of computations.
+        comps: A Python list of computations.
 
       Returns:
         A `computation_building_blocks.Block`.
@@ -401,7 +401,7 @@ def merge_tuple_intrinsics(comp):
   * intrinsic_defs.FEDERATED_AGGREGATE.uri
 
   Args:
-    comp: The computation building block in which to perform the replacements.
+    comp: The computation building block in which to perform the repalcements.
 
   Returns:
     A new computation with the transformation applied or the original `comp`.
@@ -436,17 +436,17 @@ def merge_tuple_intrinsics(comp):
     this function constructs the following computation from the functional
     arguments to the called intrinsic:
 
-                   Block
-                  /     \
-          fn=Tuple       Lambda(arg)
-             |                      \
-    [Comp(f1), Comp(f2), ...]        Tuple
-                                     |
-                                [Call,                  Call, ...]
-                                /    \                 /    \
-                          Sel(0)      Sel(0)     Sel(1)      Sel(1)
-                         /           /          /           /
-                  Ref(fn)    Ref(arg)    Ref(fn)    Ref(arg)
+                    Block
+                   /     \
+         [fn=Tuple]       Lambda(arg)
+             |                       \
+    [Comp(f1), Comp(f2), ...]         Tuple
+                                      |
+                                 [Call,                  Call, ...]
+                                 /    \                 /    \
+                           Sel(0)      Sel(0)     Sel(1)      Sel(1)
+                          /           /          /           /
+                   Ref(fn)    Ref(arg)    Ref(fn)    Ref(arg)
 
     with one `computation_building_blocks.Call` for each `n`. This computation
     represents one of `m` arguments that should be passed to the call of the
@@ -490,8 +490,8 @@ def merge_tuple_intrinsics(comp):
     to the call of the transformed computation.
 
     Args:
-      names: a Python list of names.
-      comps: a Python list of computations.
+      names: A Python list of names.
+      comps: A Python list of computations.
 
     Returns:
       A `computation_building_blocks.Block`.
@@ -518,7 +518,7 @@ def merge_tuple_intrinsics(comp):
     to the call of the transformed computation.
 
     Args:
-      names: a Python list of names.
+      names: A Python list of names.
       elements: A 2 dimentional Python list of computations.
 
     Returns:
@@ -594,8 +594,7 @@ def merge_chained_blocks(comp):
   is completely safe to add the locals lists together in this implementation,
 
   Args:
-    comp: The `computation_building_blocks.ComputationBuildingBlock` whose
-      blocks should be merged if possible.
+    comp: The computation building block in which to perform the merges.
 
   Returns:
     Transformed version of `comp` with its neighboring blocks merged.
@@ -664,6 +663,228 @@ def replace_selection_from_tuple_with_tuple_element(comp):
     else:
       index = comp.index
     return comp.source[index], True
+
+  return transformation_utils.transform_postorder(comp, _transform)
+
+
+def extract_intrinsics(comp):
+  r"""Extracts intrinsics to the scope in which they are bound.
+
+  This transform traverses `comp` postorder, matches the following pattern, and
+  replaces the following computation containing a called intrinsic:
+
+        ...
+           \
+            Call
+           /    \
+  Intrinsic      ...
+
+  with the following computation containing a block with the extracted called
+  intrinsic:
+
+                  Block
+                 /     \
+         [x=Call]       ...
+           /    \          \
+  Intrinsic      ...        Ref(x)
+
+  The called intrinsics are extracted to the scope in which they are bound. If
+  the called intrinisc is not bound by any computation in `comp` it will be
+  extracted to the root. Both the `parameter_name` of a
+  `computation_building_blocks.Lambda` and the name of any variable defined by a
+  `computation_building_blocks.Block` can affect the scope in which a reference
+  in called intrincis is bound.
+
+  NOTE: This function will also extract block variables to the scope in which
+  they are bound because block variables can limit the scope in which intrinsics
+  are bound.
+
+  Args:
+    comp: The computation building block in which to perform the extraction.
+
+  Returns:
+    A new computation with the transformation applied or the original `comp`.
+
+  Raises:
+    TypeError: If types do not match.
+    ValueError: If `comp` contains a reference named `name`.
+  """
+  py_typecheck.check_type(comp,
+                          computation_building_blocks.ComputationBuildingBlock)
+  unbound_references = _get_unbound_references(comp)
+  int_sequence = itertools.count(start=1)
+
+  def _get_variable_name():
+    """Returns a name."""
+    return '_variable{}'.format(six.next(int_sequence))
+
+  def _contains_unbound_reference(comp, names):
+    """Returns `True` if `comp` contains unbound references to `names`.
+
+    This function with update the collection of unbound references if `comp` is
+    not contained in that collection. This can happen when new computations are
+    created and added to the AST.
+
+    Args:
+      comp: The computation building block to test.
+      names: A Python string or a list, tuple, or set of Python strings.
+    """
+    if isinstance(names, six.string_types):
+      names = (names,)
+    if comp not in unbound_references:
+      references = _get_unbound_references(comp)
+      unbound_references.update(references)
+    return any(n in unbound_references[comp] for n in names)
+
+  def _is_called_intrinsic_or_block(comp):
+    """Returns `True` if `comp` is a called intrinsic or a block."""
+    return (_is_called_intrinsic(comp) or
+            isinstance(comp, computation_building_blocks.Block))
+
+  def _extract_intrinsic_from_block(comp):
+    """Returns a new computation with all intrinsics extracted."""
+    if _is_called_intrinsic(comp.result):
+      intrinsic = comp.result
+      name = _get_variable_name()
+      variables = comp.locals
+      variables.append((name, intrinsic))
+      result = computation_building_blocks.Reference(name,
+                                                     intrinsic.type_signature)
+      return computation_building_blocks.Block(variables, result)
+    elif isinstance(comp.result, computation_building_blocks.Block):
+      return computation_building_blocks.Block(comp.locals + comp.result.locals,
+                                               comp.result.result)
+    else:
+      variables = []
+      for name, variable in comp.locals:
+        if isinstance(variable, computation_building_blocks.Block):
+          variables.extend(variable.locals)
+          variables.append((name, variable.result))
+        else:
+          variables.append((name, variable))
+      return computation_building_blocks.Block(variables, comp.result)
+
+  def _extract_intrinsic_from_call(comp):
+    """Returns a new computation with all intrinsics extracted."""
+    if _is_called_intrinsic(comp.argument):
+      intrinsic = comp.argument
+      name = _get_variable_name()
+      variables = ((name, intrinsic),)
+      result = computation_building_blocks.Reference(name,
+                                                     intrinsic.type_signature)
+    else:
+      block = comp.argument
+      variables = block.locals
+      result = block.result
+    call = computation_building_blocks.Call(comp.function, result)
+    return computation_building_blocks.Block(variables, call)
+
+  def _extract_intrinsic_from_lambda(comp):
+    """Returns a new computation with all intrinsics extracted."""
+    if _is_called_intrinsic(comp.result):
+      intrinsic = comp.result
+      name = _get_variable_name()
+      variables = ((name, intrinsic),)
+      ref = computation_building_blocks.Reference(name,
+                                                  intrinsic.type_signature)
+      if not _contains_unbound_reference(comp.result, comp.parameter_name):
+        fn = computation_building_blocks.Lambda(comp.parameter_name,
+                                                comp.parameter_type, ref)
+        return computation_building_blocks.Block(variables, fn)
+      else:
+        block = computation_building_blocks.Block(variables, ref)
+        return computation_building_blocks.Lambda(comp.parameter_name,
+                                                  comp.parameter_type, block)
+    else:
+      block = comp.result
+      extracted_variables = []
+      retained_variables = []
+      for name, variable in block.locals:
+        names = [n for n, _ in retained_variables]
+        if (not _contains_unbound_reference(variable, comp.parameter_name) and
+            not _contains_unbound_reference(variable, names)):
+          extracted_variables.append((name, variable))
+        else:
+          retained_variables.append((name, variable))
+      if retained_variables:
+        result = computation_building_blocks.Block(retained_variables,
+                                                   block.result)
+      else:
+        result = block.result
+      fn = computation_building_blocks.Lambda(comp.parameter_name,
+                                              comp.parameter_type, result)
+      return computation_building_blocks.Block(extracted_variables, fn)
+
+  def _extract_intrinsic_from_selection(comp):
+    """Returns a new computation with all intrinsics extracted."""
+    if _is_called_intrinsic(comp.source):
+      intrinsic = comp.source
+      name = _get_variable_name()
+      variables = ((name, intrinsic),)
+      result = computation_building_blocks.Reference(name,
+                                                     intrinsic.type_signature)
+    else:
+      block = comp.source
+      variables = block.locals
+      result = block.result
+    selection = computation_building_blocks.Selection(
+        result, name=comp.name, index=comp.index)
+    return computation_building_blocks.Block(variables, selection)
+
+  def _extract_intrinsic_from_tuple(comp):
+    """Returns a new computation with all intrinsics extracted."""
+    variables = []
+    elements = []
+    for element_name, element in anonymous_tuple.to_elements(comp):
+      if _is_called_intrinsic_or_block(element):
+        variable_name = _get_variable_name()
+        variables.append((variable_name, element))
+        ref = computation_building_blocks.Reference(variable_name,
+                                                    element.type_signature)
+        elements.append((element_name, ref))
+      else:
+        elements.append((element_name, element))
+    tup = computation_building_blocks.Tuple(elements)
+    return computation_building_blocks.Block(variables, tup)
+
+  def _should_transform(comp):
+    """Returns `True` if `comp` should be transformed."""
+    if isinstance(comp, computation_building_blocks.Block):
+      return (_is_called_intrinsic_or_block(comp.result) or any(
+          isinstance(e, computation_building_blocks.Block)
+          for _, e in comp.locals))
+    elif isinstance(comp, computation_building_blocks.Call):
+      return _is_called_intrinsic_or_block(comp.argument)
+    elif isinstance(comp, computation_building_blocks.Lambda):
+      if _is_called_intrinsic(comp.result):
+        return True
+      if isinstance(comp.result, computation_building_blocks.Block):
+        for index, (_, variable) in enumerate(comp.result.locals):
+          names = [n for n, _ in comp.result.locals[:index]]
+          if (not _contains_unbound_reference(variable, comp.parameter_name) and
+              not _contains_unbound_reference(variable, names)):
+            return True
+    elif isinstance(comp, computation_building_blocks.Selection):
+      return _is_called_intrinsic_or_block(comp.source)
+    elif isinstance(comp, computation_building_blocks.Tuple):
+      return any(_is_called_intrinsic_or_block(e) for e in comp)
+    return False
+
+  def _transform(comp):
+    """Returns a new transformed computation or `comp`."""
+    if not _should_transform(comp):
+      return comp, False
+    if isinstance(comp, computation_building_blocks.Block):
+      comp = _extract_intrinsic_from_block(comp)
+    elif isinstance(comp, computation_building_blocks.Call):
+      comp = _extract_intrinsic_from_call(comp)
+    elif isinstance(comp, computation_building_blocks.Lambda):
+      comp = _extract_intrinsic_from_lambda(comp)
+    elif isinstance(comp, computation_building_blocks.Selection):
+      comp = _extract_intrinsic_from_selection(comp)
+    elif isinstance(comp, computation_building_blocks.Tuple):
+      comp = _extract_intrinsic_from_tuple(comp)
+    return comp, True
 
   return transformation_utils.transform_postorder(comp, _transform)
 
@@ -771,7 +992,7 @@ def inline_block_locals(comp):
       comp, _transform, empty_tree)
 
 
-def _is_called_intrinsic(comp, uri):
+def _is_called_intrinsic(comp, uri=None):
   """Returns `True` if `comp` is a called intrinsic with the `uri` or `uri`s.
 
             Call
@@ -779,15 +1000,16 @@ def _is_called_intrinsic(comp, uri):
   Intrinsic
 
   Args:
-    comp: The computation building block in which to test.
+    comp: The computation building block to test.
     uri: A uri or a list, tuple, or set of uri.
   """
   if isinstance(uri, six.string_types):
     uri = (uri,)
-  py_typecheck.check_type(uri, (list, tuple, set))
+  if uri is not None:
+    py_typecheck.check_type(uri, (list, tuple, set))
   return (isinstance(comp, computation_building_blocks.Call) and
           isinstance(comp.function, computation_building_blocks.Intrinsic) and
-          comp.function.uri in uri)
+          (uri is None or comp.function.uri in uri))
 
 
 def _is_identity_function(comp):
@@ -795,3 +1017,52 @@ def _is_identity_function(comp):
   return (isinstance(comp, computation_building_blocks.Lambda) and
           isinstance(comp.result, computation_building_blocks.Reference) and
           comp.parameter_name == comp.result.name)
+
+
+def _get_unbound_references(comp):
+  """Gets a Python dict of the unbound references in `comp`.
+
+  Args:
+    comp: The computation building block to parse.
+
+  Returns:
+    A Python dict of elements where keys are the
+    `computation_building_blocks.ComputationBuildingBlock`s in `comp` and values
+    are a Python list of the unbound references at that position in the AST.
+  """
+  py_typecheck.check_type(comp,
+                          computation_building_blocks.ComputationBuildingBlock)
+  references = {}
+
+  def _update(comp):
+    """Updates the Python dict of references."""
+    if isinstance(comp, computation_building_blocks.Reference):
+      references[comp] = [comp.name]
+    elif isinstance(comp, computation_building_blocks.Block):
+      references[comp] = []
+      names = []
+      for name, variable in comp.locals:
+        elements = references[variable]
+        references[comp].extend([e for e in elements if e not in names])
+        names.append(name)
+      elements = references[comp.result]
+      references[comp].extend([e for e in elements if e not in names])
+    elif isinstance(comp, computation_building_blocks.Call):
+      elements = references[comp.function]
+      if comp.argument is not None:
+        elements += references[comp.argument]
+      references[comp] = elements
+    elif isinstance(comp, computation_building_blocks.Lambda):
+      elements = references[comp.result]
+      references[comp] = [e for e in elements if e != comp.parameter_name]
+    elif isinstance(comp, computation_building_blocks.Selection):
+      references[comp] = references[comp.source]
+    elif isinstance(comp, computation_building_blocks.Tuple):
+      elements = [references[e] for e in comp]
+      references[comp] = list(itertools.chain.from_iterable(elements))
+    else:
+      references[comp] = []
+    return comp, False
+
+  transformation_utils.transform_postorder(comp, _update)
+  return references
